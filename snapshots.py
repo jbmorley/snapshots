@@ -1,0 +1,188 @@
+#!/usr/bin/env python3
+
+import argparse
+import datetime
+import contextlib
+import glob
+import hashlib
+import json
+import os
+import re
+import shutil
+import sys
+import tempfile
+
+from datetime import timezone
+
+
+SNAPSHOTS_DIRECTORY = os.path.expanduser("~/.snapshots")
+
+
+@contextlib.contextmanager
+def chdir(path):
+    pwd = os.getcwd()
+    path = os.path.abspath(path)
+    try:
+        os.chdir(path)
+        yield path
+    finally:
+        os.chdir(pwd)
+
+
+def hash_file(path):
+   h = hashlib.sha1()
+   with open(path,'rb') as file:
+       chunk = 0
+       while chunk != b'':
+            chunk = file.read(64 * 1024)
+            h.update(chunk)
+   return h.hexdigest()
+
+
+def hash(value):
+    h = hashlib.sha1()
+    h.update(value.encode("utf-8"))
+    return h.hexdigest()
+
+
+def get_details(path):
+    return {"h": hash_file(path)}
+
+
+def get_timestamp_utc():
+    dt = datetime.datetime.now(timezone.utc)
+    utc_time = dt.replace(tzinfo=timezone.utc)
+    utc_timestamp = utc_time.timestamp()
+    return utc_timestamp
+
+
+@contextlib.contextmanager
+def atomic_write(path):
+    with tempfile.TemporaryDirectory() as directory_path:
+        temporary_path = os.path.join(directory_path, "file")
+        try:
+            with open(temporary_path, "w") as fh:
+                yield fh
+        finally:
+            shutil.move(temporary_path, path)
+
+
+def generate_snapshot(directory, identifier):
+    timestamp = get_timestamp_utc()
+    snapshot = {}
+    for dirpath, dnames, fnames in os.walk(directory):
+        for f in fnames:
+            path = os.path.join(dirpath, f)
+            relpath = os.path.relpath(path, directory)
+            snapshot[relpath] = get_details(path)
+    snapshot_filename = f"snapshot-{identifier}-{timestamp}.json"
+    with atomic_write(os.path.join(SNAPSHOTS_DIRECTORY, snapshot_filename)) as fh:
+        json.dump(snapshot, fh, indent=4, sort_keys=True)
+        fh.write("\n")
+
+
+class Snapshot(object):
+
+    def __init__(self, path):
+        self.path = path
+        self.name = os.path.basename(path)
+        match = re.match(r"snapshot-([0-9a-f]*)-(\d+\.\d+).json", self.name)
+        if match is None:
+            raise AssertionError(f"Unable to parse snapshot filename '{self.name}'.")
+        self.identifier = match.group(1)
+        self.date = datetime.datetime.fromtimestamp(float(match.group(2)))
+        with open(path, 'r') as fh:
+            self.contents = json.load(fh)
+
+
+    def compare(self, other):
+        additions = {}
+        removals = {}
+        updates = {}
+        for path, details in other.contents.items():
+            try:
+                if details != self.contents[path]:
+                    updates[path] = details
+            except KeyError:
+                additions[path] = details
+        for path, details in self.contents.items():
+            if path not in other.contents:
+                removals[path] = details
+        return Change(date=other.date, additions=additions, removals=removals, updates=updates)
+
+
+class Change(object):
+
+    def __init__(self, date, additions, removals, updates):
+        self.date = date
+        self.additions = additions
+        self.removals = removals
+        self.updates = updates
+
+    @property
+    def is_empty(self):
+        return not (self.additions or self.removals or self.updates)
+
+    def summarize(self):
+        result = ""
+        result += f"{self.date}\n"
+        result += summarize_change("+", self.additions)
+        result += summarize_change("-", self.removals)
+        result += summarize_change("?", self.updates)
+        result += "\n"
+        return result
+
+
+def get_snapshots(identifier):
+    with chdir(SNAPSHOTS_DIRECTORY) as path:
+        snapshot_filename_template = f"snapshot-{identifier}-*.json"
+        snapshots = sorted([os.path.join(path, f) for f in glob.glob(snapshot_filename_template)])
+    for snapshot in snapshots:
+        yield Snapshot(snapshot)
+
+
+def summarize_change(prefix, details):
+    result = ""
+    for path, path_details in details.items():
+        result = result + f"{prefix} {path}\n"
+    return result
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Generate a snapshot of all the files in a directory.")
+    parser.add_argument("directory", help="directory to scan")
+    parser.add_argument("--output", help="save the report to disk")
+    options = parser.parse_args()
+    directory = os.path.abspath(options.directory)
+    output = os.path.abspath(options.output) if options.output is not None else None
+    identifier = hash(directory)
+
+    if not os.path.isdir(SNAPSHOTS_DIRECTORY):
+        os.makedirs(SNAPSHOTS_DIRECTORY)
+
+    # Generate an update-to-date snapshot.
+    print("Generating snapshot...")
+    generate_snapshot(directory, identifier)
+
+    # Generate a report from the existing snapshots.
+    print("Generating report...")
+    report = ""
+    previous_snapshot = None
+    for snapshot in get_snapshots(identifier):
+        if previous_snapshot is not None:
+            change = previous_snapshot.compare(snapshot)
+            if change.is_empty:
+                continue
+            report += change.summarize()
+        previous_snapshot = snapshot
+
+    # Output the report.
+    if output is not None:
+        with atomic_write(output) as fh:
+            fh.write(report)
+    else:
+        print(report, end="")
+
+
+if __name__ == "__main__":
+    main()
