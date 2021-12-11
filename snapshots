@@ -118,7 +118,6 @@ class Ignores(object):
 
     def __init__(self, ignores):
         self.ignores = ignores
-        print(self.ignores)
 
     def includes(self, path):
         if os.path.basename(path) in self.ignores:
