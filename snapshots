@@ -16,6 +16,7 @@ from datetime import timezone
 
 
 SNAPSHOTS_DIRECTORY = os.path.expanduser("~/.snapshots")
+SNAPSHOTS_IGNORE_PATH = os.path.expanduser("~/.snapshots_ignore")
 
 
 @contextlib.contextmanager
@@ -30,13 +31,13 @@ def chdir(path):
 
 
 def hash_file(path):
-   h = hashlib.sha1()
-   with open(path,'rb') as file:
-       chunk = 0
-       while chunk != b'':
+    h = hashlib.sha1()
+    with open(path,'rb') as file:
+        chunk = 0
+        while chunk != b'':
             chunk = file.read(64 * 1024)
             h.update(chunk)
-   return h.hexdigest()
+    return h.hexdigest()
 
 
 def hash(value):
@@ -159,6 +160,8 @@ def main():
 
     if not os.path.isdir(SNAPSHOTS_DIRECTORY):
         os.makedirs(SNAPSHOTS_DIRECTORY)
+
+
 
     # Generate an update-to-date snapshot.
     print("Generating snapshot...")
